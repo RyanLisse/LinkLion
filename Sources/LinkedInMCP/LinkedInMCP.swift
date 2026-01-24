@@ -1,5 +1,5 @@
 import Foundation
-import LinkedInKit
+import LinkLion
 import Logging
 import MCP
 
@@ -11,7 +11,7 @@ struct LinkedInMCPMain {
         
         let server = Server(
             name: "linkedin",
-            version: LinkedInKit.version,
+            version: LinkLion.version,
             capabilities: .init(
                 logging: .init(),
                 tools: .init()
@@ -28,7 +28,7 @@ struct LinkedInMCPMain {
             await handler.callTool(params)
         }
         
-        logger.info("Starting LinkedIn MCP Server v\(LinkedInKit.version)")
+        logger.info("Starting LinkedIn MCP Server v\(LinkLion.version)")
         logger.info("Tools: linkedin_status, linkedin_configure, linkedin_get_profile, linkedin_get_company, linkedin_search_jobs, linkedin_get_job")
         
         let transport = StdioTransport(logger: logger)

@@ -1,13 +1,13 @@
 import ArgumentParser
 import Foundation
-import LinkedInKit
+import LinkLion
 
 @main
 struct LinkedIn: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "linkedin",
         abstract: "LinkedIn CLI - Interact with LinkedIn from the command line",
-        version: LinkedInKit.version,
+        version: LinkLion.version,
         subcommands: [
             Auth.self,
             Profile.self,
@@ -180,6 +180,12 @@ struct Profile: AsyncParsableCommand {
     @Argument(help: "LinkedIn username or profile URL")
     var user: String
     
+    @Flag(name: .long, help: "Use Peekaboo vision for scraping (requires Screen Recording permission)")
+    var vision: Bool = false
+    
+    @Flag(name: .long, help: "Disable Peekaboo fallback on failed scrapes")
+    var noFallback: Bool = false
+    
     @OptionGroup var options: GlobalOptions
     
     func run() async throws {
@@ -189,7 +195,18 @@ struct Profile: AsyncParsableCommand {
             throw ValidationError("Invalid username or URL: \(user)")
         }
         
-        let profile = try await client.getProfile(username: username)
+        // Configure fallback behavior
+        await client.setUsePeekabooFallback(!noFallback)
+        
+        let profile: PersonProfile
+        
+        if vision {
+            // Force vision-based scraping
+            print("📸 Using Peekaboo vision to scrape profile...")
+            profile = try await client.getProfileWithVision(username: username)
+        } else {
+            profile = try await client.getProfile(username: username)
+        }
         
         if options.json {
             printJSON(profile)

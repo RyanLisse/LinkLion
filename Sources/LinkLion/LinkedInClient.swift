@@ -9,11 +9,26 @@ public actor LinkedInClient {
     private let session: URLSession
     private var liAtCookie: String?
     private let logger = Logger(label: "LinkedInKit")
+    private let peekaboo: PeekabooClient
+    private let gemini: GeminiVision
+    
+    /// Enable Peekaboo fallback for failed scrapes
+    private var _usePeekabooFallback: Bool = true
+    
+    public var usePeekabooFallback: Bool {
+        _usePeekabooFallback
+    }
+    
+    public func setUsePeekabooFallback(_ enabled: Bool) {
+        _usePeekabooFallback = enabled
+    }
     
     private static let baseURL = "https://www.linkedin.com"
     private static let apiURL = "https://www.linkedin.com/voyager/api"
     
-    public init() {
+    public init(browser: String = "Safari") {
+        self.peekaboo = PeekabooClient(browser: browser)
+        self.gemini = GeminiVision()
         let config = URLSessionConfiguration.default
         config.httpAdditionalHeaders = [
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -83,6 +98,7 @@ public actor LinkedInClient {
     // MARK: - Profile Scraping
     
     /// Get a person's LinkedIn profile
+    /// Uses HTML scraping first, falls back to Peekaboo vision if enabled
     public func getProfile(username: String) async throws -> PersonProfile {
         guard let cookie = liAtCookie else {
             throw LinkedInError.notAuthenticated
@@ -91,9 +107,80 @@ public actor LinkedInClient {
         let profileURL = "\(Self.baseURL)/in/\(username)/"
         logger.info("Fetching profile: \(username)")
         
-        let html = try await fetchPage(url: profileURL, cookie: cookie)
-        return try ProfileParser.parsePersonProfile(html: html, username: username)
+        do {
+            let html = try await fetchPage(url: profileURL, cookie: cookie)
+            let profile = try ProfileParser.parsePersonProfile(html: html, username: username)
+            
+            // Check if we got meaningful data
+            if !profile.name.isEmpty && profile.name != "LinkedIn" {
+                return profile
+            }
+            
+            // Data is incomplete, try Peekaboo if enabled
+            if _usePeekabooFallback {
+                logger.info("HTML parsing returned minimal data, trying Peekaboo vision...")
+                return try await getProfileWithVision(username: username)
+            }
+            
+            return profile
+        } catch {
+            // On error, try Peekaboo fallback
+            if _usePeekabooFallback {
+                logger.warning("HTML scraping failed: \(error). Trying Peekaboo fallback...")
+                return try await getProfileWithVision(username: username)
+            }
+            throw error
+        }
     }
+    
+    /// Get profile using Peekaboo browser automation and Gemini Vision
+    public func getProfileWithVision(username: String) async throws -> PersonProfile {
+        logger.info("Fetching profile with Peekaboo vision: \(username)")
+        
+        // Capture screenshot
+        let capture = try await peekaboo.captureScreen()
+        logger.info("Screenshot saved: \(capture.path)")
+        
+        // Analyze with Gemini Vision
+        let analysis = try await gemini.analyzeProfile(imagePath: capture.path)
+        logger.info("Gemini analysis complete")
+        
+        // Convert analysis to PersonProfile
+        return PersonProfile(
+            username: username,
+            name: analysis.name ?? username,
+            headline: analysis.headline,
+            about: analysis.about,
+            location: analysis.location,
+            company: analysis.company,
+            jobTitle: analysis.jobTitle,
+            experiences: analysis.experiences.map { exp in
+                Experience(
+                    title: exp.title,
+                    company: exp.company,
+                    location: exp.location,
+                    startDate: nil,
+                    endDate: nil,
+                    duration: exp.duration,
+                    description: nil
+                )
+            },
+            educations: analysis.educations.map { edu in
+                Education(
+                    institution: edu.institution,
+                    degree: edu.degree,
+                    startDate: nil,
+                    endDate: edu.years
+                )
+            },
+            skills: analysis.skills,
+            connectionCount: analysis.connectionCount,
+            followerCount: analysis.followerCount,
+            openToWork: analysis.openToWork
+        )
+    }
+    
+    
     
     /// Get a company's LinkedIn profile
     public func getCompany(name: String) async throws -> CompanyProfile {
