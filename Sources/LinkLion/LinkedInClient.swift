@@ -234,6 +234,122 @@ public actor LinkedInClient {
         return try JobParser.parseJobDetails(html: html, jobId: id)
     }
     
+    // MARK: - Connections & Messaging
+    
+    /// Send a connection invitation to a LinkedIn profile
+    /// - Parameters:
+    ///   - profileUrn: The URN of the profile (e.g., "urn:li:fsd_profile:ACoAA...")
+    ///   - message: Optional custom message to include with the invitation
+    public func sendInvite(profileUrn: String, message: String?) async throws {
+        guard let cookie = liAtCookie else {
+            throw LinkedInError.notAuthenticated
+        }
+        
+        guard Self.isValidURN(profileUrn) else {
+            throw LinkedInError.invalidURN(profileUrn)
+        }
+        
+        logger.info("Sending invite to: \(profileUrn)")
+        
+        let url = Self.buildInviteURL()
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("li_at=\(cookie)", forHTTPHeaderField: "Cookie")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/vnd.linkedin.normalized+json+2.1", forHTTPHeaderField: "Accept")
+        request.setValue("2.0.0", forHTTPHeaderField: "X-RestLi-Protocol-Version")
+        request.setValue("en_US", forHTTPHeaderField: "X-Li-Lang")
+        
+        let payload = InvitePayload(profileUrn: profileUrn, message: message)
+        request.httpBody = try JSONEncoder().encode(payload)
+        
+        let (_, response) = try await session.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LinkedInError.invalidResponse
+        }
+        
+        if httpResponse.statusCode == 429 {
+            throw LinkedInError.rateLimited
+        }
+        
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw LinkedInError.httpError(httpResponse.statusCode)
+        }
+        
+        logger.info("Invite sent successfully")
+    }
+    
+    /// Send a message to a LinkedIn profile
+    /// - Parameters:
+    ///   - profileUrn: The URN of the profile (e.g., "urn:li:fsd_profile:ACoAA...")
+    ///   - message: The message content to send
+    public func sendMessage(profileUrn: String, message: String) async throws {
+        guard let cookie = liAtCookie else {
+            throw LinkedInError.notAuthenticated
+        }
+        
+        guard Self.isValidURN(profileUrn) else {
+            throw LinkedInError.invalidURN(profileUrn)
+        }
+        
+        logger.info("Sending message to: \(profileUrn)")
+        
+        let url = Self.buildMessageURL()
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("li_at=\(cookie)", forHTTPHeaderField: "Cookie")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/vnd.linkedin.normalized+json+2.1", forHTTPHeaderField: "Accept")
+        request.setValue("2.0.0", forHTTPHeaderField: "X-RestLi-Protocol-Version")
+        request.setValue("en_US", forHTTPHeaderField: "X-Li-Lang")
+        
+        let payload = MessagePayload(profileUrn: profileUrn, message: message)
+        request.httpBody = try JSONEncoder().encode(payload)
+        
+        let (_, response) = try await session.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LinkedInError.invalidResponse
+        }
+        
+        if httpResponse.statusCode == 429 {
+            throw LinkedInError.rateLimited
+        }
+        
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw LinkedInError.httpError(httpResponse.statusCode)
+        }
+        
+        logger.info("Message sent successfully")
+    }
+    
+    /// Resolve a username to a placeholder URN format
+    public func resolveURN(from username: String) async throws -> String {
+        guard liAtCookie != nil else {
+            throw LinkedInError.notAuthenticated
+        }
+        return Self.buildPlaceholderURN(from: username)
+    }
+    
+    // MARK: - Static Helpers
+    
+    public static func buildInviteURL() -> URL {
+        URL(string: "\(apiURL)/voyagerRelationshipsDashMemberRelationships?action=verifyQuotaAndCreateV2")!
+    }
+    
+    public static func buildMessageURL() -> URL {
+        URL(string: "\(apiURL)/messaging/conversations")!
+    }
+    
+    public static func buildPlaceholderURN(from username: String) -> String {
+        "urn:li:fsd_profile:\(username)"
+    }
+    
+    public static func isValidURN(_ urn: String) -> Bool {
+        urn.hasPrefix("urn:li:") && urn.contains("_profile:") || urn.contains("_miniProfile:")
+    }
+    
     // MARK: - Private Helpers
     
     private func fetchPage(url: String, cookie: String) async throws -> String {
@@ -293,6 +409,7 @@ public enum LinkedInError: Error, LocalizedError, Sendable {
     case parseError(String)
     case rateLimited
     case profileNotFound
+    case invalidURN(String)
     
     public var errorDescription: String? {
         switch self {
@@ -312,6 +429,76 @@ public enum LinkedInError: Error, LocalizedError, Sendable {
             return "Rate limited by LinkedIn. Please wait before retrying."
         case .profileNotFound:
             return "Profile not found"
+        case .invalidURN(let urn):
+            return "Invalid URN format: \(urn)"
         }
+    }
+}
+
+// MARK: - Invite Payload
+
+public struct InvitePayload: Codable, Sendable {
+    public let invitee: Invitee
+    public let customMessage: String?
+    
+    public init(profileUrn: String, message: String?) {
+        self.invitee = Invitee(inviteeUnion: InviteeUnion(memberProfile: profileUrn))
+        self.customMessage = message
+    }
+    
+    public struct Invitee: Codable, Sendable {
+        public let inviteeUnion: InviteeUnion
+    }
+    
+    public struct InviteeUnion: Codable, Sendable {
+        public let memberProfile: String
+    }
+}
+
+// MARK: - Message Payload
+
+public struct MessagePayload: Codable, Sendable {
+    public let keyVersion: String
+    public let conversationCreate: ConversationCreate
+    
+    public init(profileUrn: String, message: String) {
+        self.keyVersion = "LEGACY_INBOX"
+        self.conversationCreate = ConversationCreate(
+            eventCreate: EventCreate(
+                value: EventValue(
+                    messageCreate: MessageCreate(
+                        attributedBody: AttributedBody(text: message)
+                    )
+                )
+            ),
+            recipients: [profileUrn],
+            subtype: "MEMBER_TO_MEMBER"
+        )
+    }
+    
+    public struct ConversationCreate: Codable, Sendable {
+        public let eventCreate: EventCreate
+        public let recipients: [String]
+        public let subtype: String
+    }
+    
+    public struct EventCreate: Codable, Sendable {
+        public let value: EventValue
+    }
+    
+    public struct EventValue: Codable, Sendable {
+        public let messageCreate: MessageCreate
+        
+        enum CodingKeys: String, CodingKey {
+            case messageCreate = "com.linkedin.voyager.messaging.create.MessageCreate"
+        }
+    }
+    
+    public struct MessageCreate: Codable, Sendable {
+        public let attributedBody: AttributedBody
+    }
+    
+    public struct AttributedBody: Codable, Sendable {
+        public let text: String
     }
 }

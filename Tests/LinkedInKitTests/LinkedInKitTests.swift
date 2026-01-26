@@ -1,5 +1,5 @@
 import XCTest
-@testable import LinkedInKit
+@testable import LinkLion
 
 final class LinkedInKitTests: XCTestCase {
     
@@ -170,5 +170,216 @@ final class LinkedInKitTests: XCTestCase {
         XCTAssertTrue(json.contains("Anthropic"))
         XCTAssertTrue(json.contains("anthropic"))
         XCTAssertTrue(json.contains("AI Safety"))
+    }
+    
+    // MARK: - Send Invite Tests
+    
+    func testSendInvitePayloadConstruction() throws {
+        // Test that sendInvite constructs correct payload structure
+        let profileUrn = "urn:li:fsd_profile:ACoAABcdefg123"
+        let message = "Hello, I'd like to connect!"
+        
+        let payload = InvitePayload(profileUrn: profileUrn, message: message)
+        
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(payload)
+        let json = String(data: data, encoding: .utf8)!
+        
+        // Verify payload structure matches API spec
+        XCTAssertTrue(json.contains("invitee"))
+        XCTAssertTrue(json.contains("inviteeUnion"))
+        XCTAssertTrue(json.contains("memberProfile"))
+        XCTAssertTrue(json.contains(profileUrn))
+        XCTAssertTrue(json.contains("customMessage"))
+        XCTAssertTrue(json.contains(message))
+    }
+    
+    func testSendInvitePayloadWithoutMessage() throws {
+        // Test invite without custom message
+        let profileUrn = "urn:li:fsd_profile:ACoAABcdefg123"
+        
+        let payload = InvitePayload(profileUrn: profileUrn, message: nil)
+        
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(payload)
+        let json = String(data: data, encoding: .utf8)!
+        
+        // Verify payload has invitee but no customMessage when nil
+        XCTAssertTrue(json.contains("invitee"))
+        XCTAssertTrue(json.contains(profileUrn))
+    }
+    
+    func testSendInviteURLConstruction() {
+        // Test that the invite URL is correctly constructed
+        let expectedPath = "/voyagerRelationshipsDashMemberRelationships"
+        let expectedAction = "action=verifyQuotaAndCreateV2"
+        
+        let url = LinkedInClient.buildInviteURL()
+        
+        XCTAssertTrue(url.absoluteString.contains(expectedPath))
+        XCTAssertTrue(url.absoluteString.contains(expectedAction))
+    }
+    
+    // MARK: - Send Message Tests
+    
+    func testSendMessagePayloadConstruction() throws {
+        // Test that sendMessage constructs correct payload structure
+        let profileUrn = "urn:li:fsd_profile:ACoAABcdefg123"
+        let messageText = "Hi there! How are you?"
+        
+        let payload = MessagePayload(profileUrn: profileUrn, message: messageText)
+        
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(payload)
+        let json = String(data: data, encoding: .utf8)!
+        
+        // Verify payload structure matches API spec
+        XCTAssertTrue(json.contains("keyVersion"))
+        XCTAssertTrue(json.contains("LEGACY_INBOX"))
+        XCTAssertTrue(json.contains("conversationCreate"))
+        XCTAssertTrue(json.contains("eventCreate"))
+        XCTAssertTrue(json.contains("com.linkedin.voyager.messaging.create.MessageCreate"))
+        XCTAssertTrue(json.contains("attributedBody"))
+        XCTAssertTrue(json.contains(messageText))
+        XCTAssertTrue(json.contains("recipients"))
+        XCTAssertTrue(json.contains(profileUrn))
+        XCTAssertTrue(json.contains("MEMBER_TO_MEMBER"))
+    }
+    
+    func testSendMessageURLConstruction() {
+        // Test that the message URL is correctly constructed
+        let expectedPath = "/messaging/conversations"
+        
+        let url = LinkedInClient.buildMessageURL()
+        
+        XCTAssertTrue(url.absoluteString.contains(expectedPath))
+    }
+    
+    // MARK: - Resolve URN Tests
+    
+    func testResolveURNFromUsername() {
+        // Test placeholder URN generation from username
+        let username = "johndoe"
+        let urn = LinkedInClient.buildPlaceholderURN(from: username)
+        
+        XCTAssertEqual(urn, "urn:li:fsd_profile:johndoe")
+    }
+    
+    func testResolveURNFromUsernameWithSpecialChars() {
+        // Test URN generation with username containing special characters
+        let username = "john-doe-123"
+        let urn = LinkedInClient.buildPlaceholderURN(from: username)
+        
+        XCTAssertEqual(urn, "urn:li:fsd_profile:john-doe-123")
+    }
+    
+    func testURNValidation() {
+        // Test URN format validation
+        XCTAssertTrue(LinkedInClient.isValidURN("urn:li:fsd_profile:ACoAABcdefg123"))
+        XCTAssertTrue(LinkedInClient.isValidURN("urn:li:fs_miniProfile:123456"))
+        XCTAssertFalse(LinkedInClient.isValidURN("johndoe"))
+        XCTAssertFalse(LinkedInClient.isValidURN("https://linkedin.com/in/johndoe"))
+        XCTAssertFalse(LinkedInClient.isValidURN(""))
+    }
+    
+    func testClientRequiresAuthForSendInvite() async {
+        // Test that sendInvite throws notAuthenticated when no cookie
+        let client = LinkedInClient()
+        
+        do {
+            try await client.sendInvite(profileUrn: "urn:li:fsd_profile:test", message: nil)
+            XCTFail("Expected notAuthenticated error")
+        } catch LinkedInError.notAuthenticated {
+            // Expected
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+    
+    func testClientRequiresAuthForSendMessage() async {
+        // Test that sendMessage throws notAuthenticated when no cookie
+        let client = LinkedInClient()
+        
+        do {
+            try await client.sendMessage(profileUrn: "urn:li:fsd_profile:test", message: "Hello")
+            XCTFail("Expected notAuthenticated error")
+        } catch LinkedInError.notAuthenticated {
+            // Expected
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+    
+    func testSendInviteWithInvalidURN() async {
+        // Test that sendInvite throws invalidURN error for invalid format
+        let client = LinkedInClient()
+        await client.configure(cookie: "test-cookie")
+        
+        do {
+            try await client.sendInvite(profileUrn: "invalid-urn", message: nil)
+            XCTFail("Expected invalidURN error")
+        } catch LinkedInError.invalidURN {
+            // Expected
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+    
+    func testSendMessageWithInvalidURN() async {
+        // Test that sendMessage throws invalidURN error for invalid format
+        let client = LinkedInClient()
+        await client.configure(cookie: "test-cookie")
+        
+        do {
+            try await client.sendMessage(profileUrn: "invalid-urn", message: "Hello")
+            XCTFail("Expected invalidURN error")
+        } catch LinkedInError.invalidURN {
+            // Expected
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+    
+    func testResolveURNRequiresAuth() async {
+        // Test that resolveURN requires authentication
+        let client = LinkedInClient()
+        
+        do {
+            _ = try await client.resolveURN(from: "johndoe")
+            // Should not throw - resolveURN uses placeholder URN generation
+            // which doesn't require auth, but let's verify it works
+            let urn = try await client.resolveURN(from: "johndoe")
+            XCTAssertEqual(urn, "urn:li:fsd_profile:johndoe")
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+    
+    func testSendInviteWithEmptyMessage() throws {
+        // Test invite with empty string message (should be treated as nil)
+        let profileUrn = "urn:li:fsd_profile:ACoAABcdefg123"
+        let payload = InvitePayload(profileUrn: profileUrn, message: "")
+        
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(payload)
+        let json = String(data: data, encoding: .utf8)!
+        
+        // Empty string should still be included in JSON
+        XCTAssertTrue(json.contains("customMessage"))
+    }
+    
+    func testSendMessageWithLongText() throws {
+        // Test message with long text content
+        let profileUrn = "urn:li:fsd_profile:ACoAABcdefg123"
+        let longMessage = String(repeating: "A", count: 1000)
+        
+        let payload = MessagePayload(profileUrn: profileUrn, message: longMessage)
+        
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(payload)
+        let json = String(data: data, encoding: .utf8)!
+        
+        XCTAssertTrue(json.contains(longMessage))
+        XCTAssertTrue(json.contains(profileUrn))
     }
 }

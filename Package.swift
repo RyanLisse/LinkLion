@@ -49,5 +49,12 @@ let package = Package(
                 .swiftLanguageMode(.v6)
             ]
         ),
+        .testTarget(
+            name: "LinkedInKitTests",
+            dependencies: ["LinkLion"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6)
+            ]
+        ),
     ]
 )
