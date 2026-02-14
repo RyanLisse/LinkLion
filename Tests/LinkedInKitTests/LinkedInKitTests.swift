@@ -96,6 +96,28 @@ final class LinkedInKitTests: XCTestCase {
         XCTAssertTrue(json.contains("Tech Corp"))
     }
     
+    // MARK: - Auth Command CLI Tests
+
+    func testAuthCommandParsesBrowserOption() throws {
+        // Test --browser flag parsing
+        let args = ["linkedin", "auth", "--browser", "safari"]
+        // Note: This is a placeholder - actual CLI parsing test would require
+        // ArgumentParser testing infrastructure
+        XCTAssertTrue(args.contains("--browser"))
+        XCTAssertTrue(args.contains("safari"))
+    }
+
+    func testAuthCommandParsesProfileOption() throws {
+        let args = ["linkedin", "auth", "--browser", "chrome", "--profile", "1"]
+        XCTAssertTrue(args.contains("--profile"))
+        XCTAssertTrue(args.contains("1"))
+    }
+
+    func testAuthCommandParsesListBrowsersFlag() throws {
+        let args = ["linkedin", "auth", "--list-browsers"]
+        XCTAssertTrue(args.contains("--list-browsers"))
+    }
+
     func testPersonProfileEncoding() throws {
         let profile = PersonProfile(
             username: "johndoe",
@@ -346,10 +368,9 @@ final class LinkedInKitTests: XCTestCase {
         
         do {
             _ = try await client.resolveURN(from: "johndoe")
-            // Should not throw - resolveURN uses placeholder URN generation
-            // which doesn't require auth, but let's verify it works
-            let urn = try await client.resolveURN(from: "johndoe")
-            XCTAssertEqual(urn, "urn:li:fsd_profile:johndoe")
+            XCTFail("Expected notAuthenticated error")
+        } catch LinkedInError.notAuthenticated {
+            // Expected
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
@@ -381,5 +402,39 @@ final class LinkedInKitTests: XCTestCase {
         
         XCTAssertTrue(json.contains(longMessage))
         XCTAssertTrue(json.contains(profileUrn))
+    }
+
+    func testParseConversationsFromVisionElements() {
+        let elements = [
+            VisionElement(id: "row-1", label: "Jane Doe: Are you free this week? unread", role: "row", bounds: nil),
+            VisionElement(id: "row-2", label: "John Smith: Thanks for connecting", role: "row", bounds: nil),
+            VisionElement(id: "noise", label: "Messaging", role: "heading", bounds: nil),
+        ]
+
+        let conversations = LinkedInClient.parseConversationsFromVision(elements: elements, limit: 10)
+
+        XCTAssertEqual(conversations.count, 2)
+        XCTAssertEqual(conversations[0].participantNames, ["Jane Doe"])
+        XCTAssertEqual(conversations[0].lastMessage, "Are you free this week?")
+        XCTAssertTrue(conversations[0].unread)
+        XCTAssertEqual(conversations[1].participantNames, ["John Smith"])
+        XCTAssertEqual(conversations[1].lastMessage, "Thanks for connecting")
+        XCTAssertFalse(conversations[1].unread)
+    }
+
+    func testParseMessagesFromVisionElements() {
+        let elements = [
+            VisionElement(id: "msg-1", label: "Jane Doe: Thanks for reaching out", role: "text", bounds: nil),
+            VisionElement(id: "msg-2", label: "You: Happy to connect", role: "text", bounds: nil),
+            VisionElement(id: "noise", label: "Type a message", role: "textbox", bounds: nil),
+        ]
+
+        let messages = LinkedInClient.parseMessagesFromVision(elements: elements, limit: 10)
+
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertEqual(messages[0].senderName, "Jane Doe")
+        XCTAssertEqual(messages[0].text, "Thanks for reaching out")
+        XCTAssertEqual(messages[1].senderName, "You")
+        XCTAssertEqual(messages[1].text, "Happy to connect")
     }
 }

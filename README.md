@@ -35,8 +35,8 @@ cd LinkLion
 swift build -c release
 
 # Install CLI tools
-cp .build/release/linklion /usr/local/bin/
-cp .build/release/linklion-mcp /usr/local/bin/
+cp .build/release/linkedin /usr/local/bin/
+cp .build/release/linkedin-mcp /usr/local/bin/
 ```
 
 ### Authentication
@@ -44,15 +44,28 @@ cp .build/release/linklion-mcp /usr/local/bin/
 LinkLion uses LinkedIn's `li_at` cookie for authentication:
 
 ```bash
-# Interactive auth (shows instructions)
-linklion auth
+# 🚀 EASIEST: Automatic browser extraction (recommended)
+linkedin auth --browser safari
+linkedin auth --browser chrome
+linkedin auth --browser edge
+linkedin auth --browser firefox
 
-# Direct auth
-linklion auth YOUR_LI_AT_COOKIE_HERE
+# List available browsers and profiles
+linkedin auth --list-browsers
 
-# Check status
-linklion status
+# Manual auth (if automatic extraction fails)
+linkedin auth YOUR_LI_AT_COOKIE_HERE
+
+# Interactive auth (shows detailed instructions)
+linkedin auth
+
+# Check authentication status
+linkedin status
 ```
+
+**Note**: Browser extraction may prompt for:
+- **Safari**: Full Disk Access in System Settings → Privacy & Security
+- **Chrome/Edge**: Keychain access (allow when prompted)
 
 ## 📖 Usage
 
@@ -60,18 +73,18 @@ linklion status
 
 ```bash
 # 👤 Get a profile
-linklion profile johndoe
-linklion profile "https://linkedin.com/in/johndoe" --json
+linkedin profile johndoe
+linkedin profile "https://linkedin.com/in/johndoe" --json
 
 # 🏢 Get a company
-linklion company microsoft
-linklion company "https://linkedin.com/company/anthropic" --json
+linkedin company microsoft
+linkedin company "https://linkedin.com/company/anthropic" --json
 
 # 💼 Search jobs
-linklion jobs "Swift Developer" --location "Remote" --limit 10
+linkedin jobs "Swift Developer" --location "Remote" --limit 10
 
 # 📋 Get job details
-linklion job 1234567890 --json
+linkedin job 1234567890 --json
 ```
 
 ### MCP Server Setup
@@ -82,7 +95,7 @@ Add to your `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "linklion": {
-      "command": "/usr/local/bin/linklion-mcp",
+      "command": "/usr/local/bin/linkedin-mcp",
       "args": [],
       "disabled": false
     }
@@ -95,8 +108,8 @@ Add to your `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```mermaid
 graph TB
     subgraph User Layer
-        CLI[linklion CLI]
-        MCP[linklion-mcp Server]
+        CLI[linkedin CLI]
+        MCP[linkedin-mcp Server]
     end
     
     subgraph LinkLion Core

@@ -1,5 +1,5 @@
 {
-  "originHash" : "5cd2dbe73cbc0bde2dc0ac9f6ed9b5e6961b38e046845610a81f7cc5ea4a6c86",
+  "originHash" : "1eb0fff04b1932bd3a7b992981171d44fa3c4e76322aa6bb119b349b17669d25",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -17,6 +17,15 @@
       "state" : {
         "revision" : "0d91406ecd4d6c1c56275866f00508d9aeacc92a",
         "version" : "1.2.0"
+      }
+    },
+    {
+      "identity" : "sweetcookiekit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/steipete/SweetCookieKit",
+      "state" : {
+        "revision" : "4d5b71ffbb296937dc5ee8472f64721bca771cf0",
+        "version" : "0.4.0"
       }
     },
     {
