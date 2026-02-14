@@ -234,7 +234,8 @@ public actor LinkedInClient {
         return try JobParser.parseJobDetails(html: html, jobId: id)
     }
     
-    // MARK: - Connections & Messaging
+    
+// MARK: - Connections & Messaging
     
     /// Send a connection invitation to a LinkedIn profile
     /// - Parameters:
@@ -350,40 +351,409 @@ public actor LinkedInClient {
         urn.hasPrefix("urn:li:") && urn.contains("_profile:") || urn.contains("_miniProfile:")
     }
     
-    // MARK: - Private Helpers
     
+// MARK: - CSRF Token
+
+    /// Fetch CSRF token by extracting JSESSIONID from LinkedIn cookies
+    private func getCSRFToken() async throws -> String {
+        guard let cookie = liAtCookie else {
+            throw LinkedInError.notAuthenticated
+        }
+
+        let url = URL(string: "\(Self.baseURL)/feed/")!
+        var request = URLRequest(url: url)
+        request.setValue("li_at=\(cookie)", forHTTPHeaderField: "Cookie")
+
+        let (_, response) = try await session.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LinkedInError.invalidResponse
+        }
+
+        // Extract JSESSIONID from Set-Cookie headers
+        if let headers = httpResponse.allHeaderFields as? [String: String],
+           let url = httpResponse.url {
+            let cookies = HTTPCookie.cookies(withResponseHeaderFields: headers, for: url)
+            for c in cookies where c.name == "JSESSIONID" {
+                let value = c.value.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                return "ajax:\(value)"
+            }
+        }
+
+        // Fallback: try to find it in response headers directly
+        if let setCookies = httpResponse.value(forHTTPHeaderField: "Set-Cookie") {
+            if let range = setCookies.range(of: "JSESSIONID=\"") {
+                let start = range.upperBound
+                if let end = setCookies[start...].range(of: "\"")?.lowerBound {
+                    let jsessionid = String(setCookies[start..<end])
+                    return "ajax:\(jsessionid)"
+                }
+            }
+        }
+
+        throw LinkedInError.parseError("Could not extract CSRF token")
+    }
+
+    /// Build an authenticated Voyager API request
+    private func voyagerRequest(path: String, method: String = "GET", body: Data? = nil) async throws -> URLRequest {
+        guard let cookie = liAtCookie else {
+            throw LinkedInError.notAuthenticated
+        }
+
+        let csrf = try await getCSRFToken()
+        let url = URL(string: "\(Self.apiURL)\(path)")!
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.setValue("li_at=\(cookie)", forHTTPHeaderField: "Cookie")
+        request.setValue(csrf, forHTTPHeaderField: "csrf-token")
+        request.setValue("2.0.0", forHTTPHeaderField: "X-Restli-Protocol-Version")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.httpBody = body
+        return request
+    }
+
+    // MARK: - Get Current User URN
+
+    /// Get the authenticated user's profile URN (needed for posting)
+    public func getMyProfileURN() async throws -> String {
+        let request = try await voyagerRequest(path: "/identity/profiles/me")
+        let (data, response) = try await session.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              httpResponse.statusCode == 200 else {
+            throw LinkedInError.invalidResponse
+        }
+
+        // Parse the miniProfile or profile ID from response
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            // Try multiple paths to find the profile ID
+            if let miniProfile = json["miniProfile"] as? [String: Any],
+               let entityUrn = miniProfile["entityUrn"] as? String {
+                return entityUrn
+            }
+            if let entityUrn = json["entityUrn"] as? String {
+                return entityUrn
+            }
+            if let plainId = json["plainId"] as? Int {
+                return "urn:li:fsd_profile:\(plainId)"
+            }
+        }
+
+        throw LinkedInError.parseError("Could not determine profile URN")
+    }
+
+    // MARK: - Post Creation
+
+    /// Create a text-only LinkedIn post
+    public func createTextPost(text: String, visibility: PostVisibility = .public) async throws -> PostResult {
+        let connectionsOnly = visibility == .connections
+
+        let payload: [String: Any] = [
+            "visibleToConnectionsOnly": connectionsOnly,
+            "externalAudienceProviders": [] as [Any],
+            "commentaryV2": [
+                "text": text,
+                "attributes": [] as [Any]
+            ] as [String: Any],
+            "origin": "FEED",
+            "allowedCommentersScope": "ALL",
+            "postState": "PUBLISHED"
+        ]
+
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        let request = try await voyagerRequest(
+            path: "/contentCreation/normShares",
+            method: "POST",
+            body: body
+        )
+
+        let (data, response) = try await session.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LinkedInError.invalidResponse
+        }
+
+        if httpResponse.statusCode == 201 || httpResponse.statusCode == 200 {
+            // Try to extract post URN from response or headers
+            var postURN: String?
+            if let restliId = httpResponse.value(forHTTPHeaderField: "X-RestLi-Id") {
+                postURN = restliId
+            } else if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                postURN = json["urn"] as? String ?? json["id"] as? String
+            }
+            return PostResult(success: true, postURN: postURN, message: "Post created successfully")
+        }
+
+        // Parse error
+        let errorMsg: String
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let msg = json["message"] as? String {
+            errorMsg = msg
+        } else {
+            errorMsg = "HTTP \(httpResponse.statusCode)"
+        }
+        return PostResult(success: false, message: errorMsg)
+    }
+
+    /// Create an article/URL share post
+    public func createArticlePost(
+        text: String,
+        url articleURL: String,
+        title: String? = nil,
+        description: String? = nil,
+        visibility: PostVisibility = .public
+    ) async throws -> PostResult {
+        let connectionsOnly = visibility == .connections
+
+        var mediaObj: [String: Any] = [
+            "status": "READY",
+            "originalUrl": articleURL
+        ]
+        if let title = title {
+            mediaObj["title"] = ["text": title]
+        }
+        if let description = description {
+            mediaObj["description"] = ["text": description]
+        }
+
+        let payload: [String: Any] = [
+            "visibleToConnectionsOnly": connectionsOnly,
+            "externalAudienceProviders": [] as [Any],
+            "commentaryV2": [
+                "text": text,
+                "attributes": [] as [Any]
+            ] as [String: Any],
+            "origin": "FEED",
+            "allowedCommentersScope": "ALL",
+            "postState": "PUBLISHED",
+            "media": [
+                [
+                    "category": "ARTICLE",
+                    "data": mediaObj
+                ] as [String: Any]
+            ] as [Any]
+        ]
+
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        let request = try await voyagerRequest(
+            path: "/contentCreation/normShares",
+            method: "POST",
+            body: body
+        )
+
+        let (data, response) = try await session.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LinkedInError.invalidResponse
+        }
+
+        if httpResponse.statusCode == 201 || httpResponse.statusCode == 200 {
+            var postURN: String?
+            if let restliId = httpResponse.value(forHTTPHeaderField: "X-RestLi-Id") {
+                postURN = restliId
+            } else if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                postURN = json["urn"] as? String ?? json["id"] as? String
+            }
+            return PostResult(success: true, postURN: postURN, message: "Article post created successfully")
+        }
+
+        let errorMsg: String
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let msg = json["message"] as? String {
+            errorMsg = msg
+        } else {
+            errorMsg = "HTTP \(httpResponse.statusCode)"
+        }
+        return PostResult(success: false, message: errorMsg)
+    }
+
+    // MARK: - Media Upload
+
+    /// Upload an image and return the media URN for use in posts
+    public func uploadImage(data imageData: Data, filename: String = "image.jpg") async throws -> MediaUploadResult {
+        // Step 1: Register the upload
+        let registerPayload: [String: Any] = [
+            "mediaUploadType": "IMAGE_SHARING",
+            "fileSize": imageData.count,
+            "filename": filename
+        ]
+
+        let registerBody = try JSONSerialization.data(withJSONObject: registerPayload)
+        let registerRequest = try await voyagerRequest(
+            path: "/voyagerMediaUploadMetadata?action=upload",
+            method: "POST",
+            body: registerBody
+        )
+
+        let (registerData, registerResponse) = try await session.data(for: registerRequest)
+
+        guard let registerHttp = registerResponse as? HTTPURLResponse,
+              registerHttp.statusCode == 200 || registerHttp.statusCode == 201 else {
+            let code = (registerResponse as? HTTPURLResponse)?.statusCode ?? 0
+            throw LinkedInError.httpError(code)
+        }
+
+        guard let registerJson = try? JSONSerialization.jsonObject(with: registerData) as? [String: Any],
+              let valueObj = registerJson["value"] as? [String: Any] ?? registerJson["data"] as? [String: Any] else {
+            throw LinkedInError.parseError("Could not parse upload registration response")
+        }
+
+        // Extract upload URL and media URN from various response shapes
+        let uploadURL: String
+        let mediaURN: String
+
+        if let singleUpload = valueObj["singleUploadUrl"] as? String {
+            uploadURL = singleUpload
+        } else if let uploadMech = valueObj["uploadMechanism"] as? [String: Any] {
+            if let httpUpload = uploadMech["com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"] as? [String: Any],
+               let url = httpUpload["uploadUrl"] as? String {
+                uploadURL = url
+            } else {
+                throw LinkedInError.parseError("No upload URL in response")
+            }
+        } else {
+            throw LinkedInError.parseError("No upload URL in response")
+        }
+
+        if let urn = valueObj["urn"] as? String {
+            mediaURN = urn
+        } else if let asset = valueObj["asset"] as? String {
+            mediaURN = asset
+        } else if let mediaId = valueObj["mediaId"] as? String {
+            mediaURN = mediaId
+        } else {
+            throw LinkedInError.parseError("No media URN in response")
+        }
+
+        // Step 2: Upload the binary
+        guard let uploadURLObj = URL(string: uploadURL) else {
+            throw LinkedInError.invalidURL(uploadURL)
+        }
+
+        guard let cookie = liAtCookie else {
+            throw LinkedInError.notAuthenticated
+        }
+
+        let csrf = try await getCSRFToken()
+        var uploadRequest = URLRequest(url: uploadURLObj)
+        uploadRequest.httpMethod = "PUT"
+        uploadRequest.setValue("li_at=\(cookie)", forHTTPHeaderField: "Cookie")
+        uploadRequest.setValue(csrf, forHTTPHeaderField: "csrf-token")
+        uploadRequest.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        uploadRequest.httpBody = imageData
+
+        let (_, uploadResponse) = try await session.data(for: uploadRequest)
+
+        guard let uploadHttp = uploadResponse as? HTTPURLResponse,
+              (200...299).contains(uploadHttp.statusCode) else {
+            let code = (uploadResponse as? HTTPURLResponse)?.statusCode ?? 0
+            throw LinkedInError.httpError(code)
+        }
+
+        logger.info("Image uploaded successfully: \(mediaURN)")
+        return MediaUploadResult(mediaURN: mediaURN, uploadURL: uploadURL)
+    }
+
+    /// Create a post with an uploaded image
+    public func createImagePost(
+        text: String,
+        imageData: Data,
+        filename: String = "image.jpg",
+        visibility: PostVisibility = .public
+    ) async throws -> PostResult {
+        // Upload image first
+        let upload = try await uploadImage(data: imageData, filename: filename)
+
+        let connectionsOnly = visibility == .connections
+
+        let payload: [String: Any] = [
+            "visibleToConnectionsOnly": connectionsOnly,
+            "externalAudienceProviders": [] as [Any],
+            "commentaryV2": [
+                "text": text,
+                "attributes": [] as [Any]
+            ] as [String: Any],
+            "origin": "FEED",
+            "allowedCommentersScope": "ALL",
+            "postState": "PUBLISHED",
+            "media": [
+                [
+                    "category": "IMAGE",
+                    "data": [
+                        "status": "READY",
+                        "media": upload.mediaURN
+                    ] as [String: Any]
+                ] as [String: Any]
+            ] as [Any]
+        ]
+
+        let body = try JSONSerialization.data(withJSONObject: payload)
+        let request = try await voyagerRequest(
+            path: "/contentCreation/normShares",
+            method: "POST",
+            body: body
+        )
+
+        let (data, response) = try await session.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LinkedInError.invalidResponse
+        }
+
+        if httpResponse.statusCode == 201 || httpResponse.statusCode == 200 {
+            var postURN: String?
+            if let restliId = httpResponse.value(forHTTPHeaderField: "X-RestLi-Id") {
+                postURN = restliId
+            } else if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                postURN = json["urn"] as? String ?? json["id"] as? String
+            }
+            return PostResult(success: true, postURN: postURN, message: "Image post created successfully")
+        }
+
+        let errorMsg: String
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let msg = json["message"] as? String {
+            errorMsg = msg
+        } else {
+            errorMsg = "HTTP \(httpResponse.statusCode)"
+        }
+        return PostResult(success: false, message: errorMsg)
+    }
+
+    // MARK: - Private Helpers
+
     private func fetchPage(url: String, cookie: String) async throws -> String {
         guard let url = URL(string: url) else {
             throw LinkedInError.invalidURL(url)
         }
-        
+
         var request = URLRequest(url: url)
         request.setValue("li_at=\(cookie)", forHTTPHeaderField: "Cookie")
         request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
-        
+
         let (data, response) = try await session.data(for: request)
-        
+
         guard let httpResponse = response as? HTTPURLResponse else {
             throw LinkedInError.invalidResponse
         }
-        
-        // Check for auth issues
+
         if httpResponse.url?.path.contains("login") == true {
             throw LinkedInError.notAuthenticated
         }
-        
+
         if httpResponse.url?.path.contains("checkpoint") == true {
             throw LinkedInError.securityChallenge
         }
-        
+
         guard httpResponse.statusCode == 200 else {
             throw LinkedInError.httpError(httpResponse.statusCode)
         }
-        
+
         guard let html = String(data: data, encoding: .utf8) else {
             throw LinkedInError.invalidResponse
         }
-        
+
         return html
     }
 }
@@ -393,12 +763,51 @@ public actor LinkedInClient {
 public struct AuthStatus: Codable, Sendable {
     public let valid: Bool
     public let message: String
-    
+
     public init(valid: Bool, message: String) {
         self.valid = valid
         self.message = message
     }
 }
+
+
+// MARK: - Private Helpers
+
+    private func fetchPage(url: String, cookie: String) async throws -> String {
+        guard let url = URL(string: url) else {
+            throw LinkedInError.invalidURL(url)
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("li_at=\(cookie)", forHTTPHeaderField: "Cookie")
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await session.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LinkedInError.invalidResponse
+        }
+
+        if httpResponse.url?.path.contains("login") == true {
+            throw LinkedInError.notAuthenticated
+        }
+
+        if httpResponse.url?.path.contains("checkpoint") == true {
+            throw LinkedInError.securityChallenge
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            throw LinkedInError.httpError(httpResponse.statusCode)
+        }
+
+        guard let html = String(data: data, encoding: .utf8) else {
+            throw LinkedInError.invalidResponse
+        }
+
+        return html
+    }
+}
+
 
 public enum LinkedInError: Error, LocalizedError, Sendable {
     case notAuthenticated
@@ -434,6 +843,7 @@ public enum LinkedInError: Error, LocalizedError, Sendable {
         }
     }
 }
+
 
 // MARK: - Invite Payload
 
@@ -502,3 +912,4 @@ public struct MessagePayload: Codable, Sendable {
         public let text: String
     }
 }
+
